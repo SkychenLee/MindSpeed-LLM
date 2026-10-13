@@ -181,10 +181,20 @@ def model_provider_func_wrapper(model_provider_func):
                 peft.tuners.lora.tp_layer.LoraParallelLinear = CCLULoRAParallelLinear
 
             config = core_transformer_config_from_args(args)
+            target_modules = args.lora_target_modules
+            selected_ffn_layers = getattr(args, 'lora_ffn_layers', None)
+            if selected_ffn_layers is not None:
+                from mindspeed_llm.tasks.posttrain.lora.layer_selection import select_lora_targets
+
+                target_modules = select_lora_targets(model, target_modules, selected_ffn_layers)
+                if not target_modules:
+                    raise ValueError('FFN layer selection left this model chunk without any PEFT target modules.')
+                model._lora_target_modules_for_checkpoint = tuple(target_modules)
+                print_rank_0(f'FFN LoRA global layer indices: {list(selected_ffn_layers)}')
             lora_config = LoraConfig(
                 r=args.lora_r,
                 lora_alpha=args.lora_alpha,
-                target_modules=args.lora_target_modules,
+                target_modules=target_modules,
                 lora_dropout=0.0,
                 bias="none",
                 megatron_config=config,
@@ -238,6 +248,10 @@ def get_model_wrapper(fn):
     def wrapper(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap_with_ddp=True, config=None, pg_collection=None):
         model_provider_func = model_provider_func_wrapper(model_provider_func)
         model = fn(model_provider_func, model_type, wrap_with_ddp, config, pg_collection)
+        if getattr(get_args(), 'lora_ffn_layers', None) is not None:
+            from mindspeed_llm.tasks.posttrain.lora.layer_selection import cache_lora_targets_for_checkpoint
+
+            cache_lora_targets_for_checkpoint(model, get_args())
         return model
 
     return wrapper

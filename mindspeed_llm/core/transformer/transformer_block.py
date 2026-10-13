@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import types
+from copy import deepcopy
 from contextlib import nullcontext
 from functools import wraps
 from typing import Optional
@@ -190,11 +191,21 @@ def _transformer_block_build_layers(self):
         # For noop layer
         if args.noop_layers and isinstance(args.noop_layers, set) and global_layer_number - 1 in args.noop_layers:
             return NoopTransformerLayer(global_layer_number)
-        return build_module(
+        selected_ffn_layers = getattr(args, 'lora_ffn_layers', None)
+        if selected_ffn_layers is not None:
+            # Specs may be shared across layers. Pass the global index explicitly,
+            # since MoELayer can be constructed before its layer_number is set.
+            layer_spec = deepcopy(layer_spec)
+            layer_spec.submodules.mlp.params = dict(layer_spec.submodules.mlp.params or {})
+            layer_spec.submodules.mlp.params['lora_ffn_layer_index'] = global_layer_number - 1
+        layer = build_module(
             layer_spec,
             config=self.config,
             layer_number=layer_number,
         )
+        if selected_ffn_layers is not None:
+            layer._lora_ffn_layer_index = global_layer_number - 1
+        return layer
 
     # offset is implicit in TransformerLayer
     self.layers = torch.nn.ModuleList(

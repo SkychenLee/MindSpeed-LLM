@@ -89,6 +89,9 @@ def _load_base_checkpoint_wrapper(fn):
         state_dict, checkpoint_name, release, ckpt_type = fn(*args, **kwargs)
         rank0 = kwargs.pop('rank0')
         if is_enable_lora() and state_dict is not None:
+            from mindspeed_llm.tasks.posttrain.lora.layer_selection import validate_checkpoint_ffn_layers
+
+            validate_checkpoint_ffn_layers(state_dict.get('args'), args_)
             words_to_match = {'weight': 'base_layer.weight', 'bias': 'base_layer.bias'}
             exclude_words = ['base_layer', 'lora_', 'norm']
             state_dict = modify_keys_with_dict(state_dict, words_to_match, exclude_words)
@@ -99,6 +102,7 @@ def _load_base_checkpoint_wrapper(fn):
             # Read the tracker file and set the iteration.
             state_dict_lora, checkpoint_name_lora, release_lora, ckpt_type_lora = fn(args_.lora_load, args_, rank0)
             if state_dict_lora is not None:
+                validate_checkpoint_ffn_layers(state_dict_lora.get('args'), args_)
                 merge_dicts(state_dict, state_dict_lora)
                 checkpoint_name = checkpoint_name_lora
                 release = release_lora

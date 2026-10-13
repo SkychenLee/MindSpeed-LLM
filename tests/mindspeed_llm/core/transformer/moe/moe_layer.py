@@ -225,7 +225,7 @@ def moe_layer_forward(
     return output, mlp_bias
 
 
-def lora_moe_layer_init(self, config, submodules=None, layer_number=None):
+def lora_moe_layer_init(self, config, submodules=None, layer_number=None, lora_ffn_layer_index=None):
     """
     "moe-alltoall-overlap-comm" only supported "moe_grouped_gemm".
     """
@@ -234,6 +234,12 @@ def lora_moe_layer_init(self, config, submodules=None, layer_number=None):
     super(MegatronMoELayer, self).__init__(config)
     self.moe_layer_recompute = config.moe_layer_recompute
     global_args = get_args()
+    selected_ffn_layers = getattr(global_args, 'lora_ffn_layers', None)
+    if selected_ffn_layers is not None and lora_ffn_layer_index is None:
+        raise ValueError('FFN LoRA layer selection requires a global layer index from TransformerBlock.')
+    enable_ffn_lora = is_enable_lora() and (
+        selected_ffn_layers is None or lora_ffn_layer_index in selected_ffn_layers
+    )
 
     if self.config.moe_tp_extend_ep:
         tp_size = parallel_state.get_tensor_model_parallel_world_size()
@@ -270,7 +276,7 @@ def lora_moe_layer_init(self, config, submodules=None, layer_number=None):
     
     # Initialize experts with LoRA for MOE if grouped GEMM is enabled
     if self.config.moe_grouped_gemm:
-        if is_enable_lora():
+        if enable_ffn_lora:
             from peft import LoraConfig
             lora_config = LoraConfig(
                 r=global_args.lora_r,
@@ -283,6 +289,8 @@ def lora_moe_layer_init(self, config, submodules=None, layer_number=None):
             )
             from mindspeed_llm.tasks.posttrain.lora.moe.experts import LoraParallelGroupedMLP
             self.experts = LoraParallelGroupedMLP(self.num_local_experts, self.config, lora_config)
+        else:
+            self.experts = build_module(self.submodules.experts, self.num_local_experts, self.config)
     else:
         self.experts = build_module(self.submodules.experts, self.num_local_experts, self.config)
 
@@ -292,7 +300,7 @@ def lora_moe_layer_init(self, config, submodules=None, layer_number=None):
             self.num_local_experts, self.local_expert_indices, config=self.config
         )
     else:
-        self.token_dispatcher = MoEAlltoAllSEQTokenDispatcher(
+        self.token_dispatcher = MoEAlltoAllTokenDispatcher(
             self.num_local_experts, self.local_expert_indices, config=self.config
         )
 

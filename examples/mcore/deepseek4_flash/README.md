@@ -174,3 +174,38 @@ bash examples/mcore/deepseek4_flash/lora_finetune_deepseek4_flash_4k_A3_ptd.sh
   | CKPT_LOAD_DIR | 权重转换保存的权重路径，为初始加载的权重 |
 
 注：LoRA微调使用指令数据集，需先执行 `examples/mcore/deepseek4_flash/data_convert_deepseek4_instruction.sh` 完成数据预处理，再将产物前缀填入 `DATA_PATH`。
+
+### 选择参与 LoRA 的 FFN 层
+
+可用 `--lora-ffn-layers` 指定参与 LoRA 的 FFN 层，示例脚本通过可选环境变量 `LORA_FFN_LAYERS` 传入。未设置或环境变量为空时，保持原来的所有 FFN 层 LoRA 行为。
+
+层号为**整个模型的全局零基编号**，不随 PP/VPP 切分重新编号。当前脚本设置 `--num-layers 44 --noop-layers 43`，因此有效 FFN 层为 `0-42`；显式选择空层 `43` 会报错。区间包含两端，步长从区间起点开始计算。
+
+| 选择值 | FFN LoRA 范围 |
+|--------|---------------|
+| 不设置 | 保持默认，所有有效 FFN 层 |
+| `30-42` | 最后 13 个有效 FFN 层 |
+| `0-42:3` | `0,3,6,...,42`，共 15 层 |
+| `0,7,14,21,28,35,42` | 显式列出的 7 层 |
+| `all` | 所有有效 FFN 层，自动排除空层 |
+| `none` | 所有 FFN 层均不加 LoRA，仍训练原有 Attention LoRA |
+
+例如，只训练最后 13 个 FFN 层的 LoRA：
+
+```sh
+LORA_FFN_LAYERS=30-42 bash examples/mcore/deepseek4_flash/lora_finetune_deepseek4_flash_4k_A3_ptd.sh
+```
+
+选择同时作用于每层的路由专家和共享专家。选中层为路由专家添加 LoRA，并保留 `--lora-target-modules` 中匹配的共享专家 FC1/FC2 LoRA；未选层不创建 FFN LoRA，基座参数仍冻结。Attention 的 LoRA 目标保持不变；因此 `none` 也不会关闭 Attention LoRA。启动日志会输出所选全局 FFN 层号和可训练参数统计，便于核对。
+
+当前选层功能限定为 DeepSeek-V4 的全 MoE、grouped GEMM 路径（`--first-k-dense-replace -1 --moe-layer-freq 1 --moe-grouped-gemm`）。启用选层时须保留至少一个全局 Attention 目标，例如 `linear_q`，以保证没有选中 FFN 的 PP 阶段仍有可训练参数；暂不支持与 MTP、LU-LoRA、`--use-fused-mlp`、MoE alltoall/allgather 通信重叠或前后向重叠组合使用。这些组合会明确报错。
+
+加载 LoRA checkpoint 继续训练时，应保持相同的 FFN 选择、LoRA 目标模块和并行配置。选层控制流已通过 CPU 测试，尚未完成 NPU 训练验证；仅减少 FFN LoRA 层数不保证提速或同比例减少激活显存，因为各层 Attention LoRA 仍需要反向传播。
+
+本地无需 NPU、PyTorch 或 Megatron，在仓库根目录安装 `pytest` 后即可运行选层测试：
+
+```sh
+python -m pytest -q tests/unit_tests/test_lora_layer_selection.py tests/unit_tests/test_lora_layer_integration.py
+```
+
+测试覆盖参数解析、全局层号传递、专家构造、PEFT 目标筛选和 checkpoint 加载逻辑；硬件依赖使用测试桩替代，因此不验证实际算子、数值梯度或多卡通信。

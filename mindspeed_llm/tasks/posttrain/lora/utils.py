@@ -39,24 +39,33 @@ def merge_dicts(dict1, dict2):
     return result
 
 
-def modify_keys_with_dict(dictionary, words_to_replace, exclude_words):
+def modify_keys_with_dict(dictionary, words_to_replace, exclude_words, model_key=None):
     args = get_args()
     modified_dict = {}
     for key, value in dictionary.items():
         key_str = str(key)
         matched_word = next((word for word, replacement in words_to_replace.items() if word in key_str), None)
         is_target_module = any('.' + target_module + '.' in key_str for target_module in args.lora_target_modules)
+        if getattr(args, 'lora_ffn_layers', None) is not None:
+            from mindspeed_llm.tasks.posttrain.lora.layer_selection import checkpoint_key_is_lora_target
+
+            # Each PP/VPP chunk has its own local layer names. Only rename
+            # parameters of modules actually wrapped by PEFT on that chunk.
+            targets = getattr(args, '_lora_target_modules_by_model', {}).get(model_key, ())
+            is_target_module = checkpoint_key_is_lora_target(key_str, targets)
+        is_model_key = key_str == 'model' or (key_str.startswith('model') and key_str[5:].isdigit())
+        child_model_key = key_str if is_model_key else model_key
         not_exclude_word = not any(exclude_word in key_str for exclude_word in exclude_words)
         if all([matched_word, not_exclude_word, key_str != matched_word, is_target_module]):
             # Check if a word to replace is present in the key and none of the exclude_words are present
             new_key = key_str.replace(matched_word, words_to_replace[matched_word])
             if isinstance(value, dict):
-                modified_dict[new_key] = modify_keys_with_dict(value, words_to_replace, exclude_words)
+                modified_dict[new_key] = modify_keys_with_dict(value, words_to_replace, exclude_words, child_model_key)
             else:
                 modified_dict[new_key] = value
         else:
             if isinstance(value, dict):
-                modified_dict[key] = modify_keys_with_dict(value, words_to_replace, exclude_words)
+                modified_dict[key] = modify_keys_with_dict(value, words_to_replace, exclude_words, child_model_key)
             else:
                 modified_dict[key] = value
     return modified_dict

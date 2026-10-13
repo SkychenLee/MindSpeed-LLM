@@ -11,6 +11,11 @@ class LoraFeature(MindSpeedFeature):
     def register_args(self, parser: ArgumentParser):
         group = parser.add_argument_group(title=self.feature_name)
         group.add_argument('--lora-target-modules', nargs='+', type=str, default=[], help='Lora target modules.')
+        group.add_argument(
+            '--lora-ffn-layers', type=str, default=None,
+            help='DeepSeek-V4 FFN LoRA global zero-based layers: all, none, comma-separated indices, '
+                 'inclusive ranges (30-42), or stepped ranges (0-42:3). Omit to preserve all-layer LoRA.',
+        )
         group.add_argument('--lora-load', type=str, default=None, help='Directory containing a lora model checkpoint.')
         group.add_argument('--lora-r', type=int, default=16, help='Lora r.')
         group.add_argument('--lora-alpha', type=int, default=32, help='Lora alpha.')
@@ -64,3 +69,39 @@ class LoraFeature(MindSpeedFeature):
 
         if has_valid_lora_target and args.moe_tp_extend_ep:
             raise AssertionError('Lora is not supported with moe-tp-extend-ep.')
+
+        if getattr(args, 'lora_ffn_layers', None) is None:
+            return
+
+        if not has_valid_lora_target:
+            raise ValueError('--lora-ffn-layers requires --lora-target-modules.')
+        if getattr(args, 'position_embedding_type', None) != 'deepseek4':
+            raise ValueError('--lora-ffn-layers currently supports only DeepSeek-V4 (position-embedding-type deepseek4).')
+        if not args.num_experts or args.num_experts <= 0 or not getattr(args, 'moe_grouped_gemm', False):
+            raise ValueError('--lora-ffn-layers requires MoE experts with --moe-grouped-gemm.')
+        if getattr(args, 'first_k_dense_replace', None) != -1 or getattr(args, 'moe_layer_freq', None) != 1:
+            raise ValueError('--lora-ffn-layers requires all-MoE layers: --first-k-dense-replace -1 --moe-layer-freq 1.')
+
+        attention_targets = {'linear_q', 'linear_kv', 'linear_q_up_proj', 'linear_o_down_proj', 'linear_o_up_proj'}
+        if not attention_targets.intersection(args.lora_target_modules):
+            raise ValueError(
+                '--lora-ffn-layers requires at least one global DeepSeek-V4 attention target '
+                '(linear_q, linear_kv, linear_q_up_proj, linear_o_down_proj, or linear_o_up_proj) '
+                'so pipeline stages without selected FFNs still train attention LoRA.'
+            )
+        if getattr(args, 'mtp_num_layers', None):
+            raise ValueError('--lora-ffn-layers does not currently support MTP.')
+        if getattr(args, 'lu_lora_final_layer_index', None) is not None:
+            raise ValueError('--lora-ffn-layers does not currently support LU-LoRA.')
+        unsupported_flags = (
+            'use_fused_mlp', 'moe_alltoall_overlap_comm', 'moe_allgather_overlap_comm', 'moe_fb_overlap',
+        )
+        for flag in unsupported_flags:
+            if getattr(args, flag, False):
+                raise ValueError(f'--lora-ffn-layers does not currently support --{flag.replace("_", "-")}.')
+
+        from mindspeed_llm.tasks.posttrain.lora.layer_selection import parse_ffn_lora_layers
+
+        args.lora_ffn_layers = parse_ffn_lora_layers(
+            args.lora_ffn_layers, args.num_layers, getattr(args, 'noop_layers', None),
+        )

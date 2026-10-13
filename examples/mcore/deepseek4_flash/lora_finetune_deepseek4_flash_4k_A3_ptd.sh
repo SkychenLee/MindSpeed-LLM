@@ -206,6 +206,15 @@ FINETUNE_ARGS="
     --lora-target-modules linear_q linear_kv linear_fc1 linear_fc2 linear_q_up_proj linear_o_down_proj linear_o_up_proj \
 "
 
+# Optional global zero-based FFN layer selection; empty preserves all-layer LoRA.
+# Valid effective layers are 0-42; layer 43 is a no-op and cannot be selected.
+# Examples: LORA_FFN_LAYERS=30-42 (last 13), 0-42:3, 0,7,14,21,28,35,42, all, none.
+# Both routed and shared FFN experts are selected; attention targets stay unchanged.
+LORA_FFN_ARGS=()
+if [[ -n "${LORA_FFN_LAYERS:-}" ]]; then
+    LORA_FFN_ARGS=(--lora-ffn-layers "$LORA_FFN_LAYERS")
+fi
+
 python -m torch.distributed.launch $DISTRIBUTED_ARGS posttrain_gpt.py \
     $GPT_ARGS \
     $DATA_ARGS \
@@ -217,4 +226,5 @@ python -m torch.distributed.launch $DISTRIBUTED_ARGS posttrain_gpt.py \
     $CA_ARGS \
     $MEM_ARGS \
     $FINETUNE_ARGS \
+    "${LORA_FFN_ARGS[@]}" \
     --distributed-backend nccl 2>&1 | tee logs/lora_finetune_deepseek4_flash_4k_A3_ptd.log
